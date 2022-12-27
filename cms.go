@@ -40,18 +40,19 @@ func New() *Cms {
 }
 
 // Run returns a channel that receives Messages. Close the channel to shutdown the cms.
-func (c *Cms) Run(P Publisher, E ErrorHandler) chan Message {
-	done := make(chan bool)
+func (c *Cms) Run(P Publisher, E ErrorHandler) (chan Message, chan bool) {
+	done1, done2 := make(chan bool), make(chan bool)
 	listenQueue := make(chan Message, 100)
 	loadQueue := make(chan Message)
-	go c.load(done, loadQueue, P, E)
+	go c.load(done1, loadQueue, P, E)
 	go func() {
 		for {
 			msg, ok := <-listenQueue
 			if !ok {
 				// close loadQueue
 				close(loadQueue)
-				<-done
+				<-done1
+				done2 <- true
 				return
 			}
 			id := msg.ArticleId()
@@ -62,7 +63,7 @@ func (c *Cms) Run(P Publisher, E ErrorHandler) chan Message {
 			}
 		}
 	}()
-	return listenQueue
+	return listenQueue, done2
 }
 
 func (c *Cms) load(done chan bool, loadQueue chan Message, P Publisher, E ErrorHandler) {
