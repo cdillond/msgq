@@ -1,10 +1,9 @@
-// package cms provides a bare-bones, unoptimized implementation of a content management system.
+// Package cms provides a bare-bones, unoptimized implementation of a content management system.
 package cms
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -69,7 +68,7 @@ func New(L Listener, P Publisher, E ErrorHandler) *Cms {
 	}
 }
 
-// Run blocks and should always be invoked in a new goroutine.
+// Run blocks and should always be invoked in a new goroutine. Run should not be called after ShutDown.
 func (c *Cms) Run() {
 	go c.L.Listen(c.ctx, c.listenQueue)
 	go c.load(c.done)
@@ -94,11 +93,8 @@ func (c *Cms) load(done chan bool) {
 		select {
 		case msg, ok := <-c.loadQueue:
 			if !ok {
-				// de-queue
-				fmt.Println("there should be some output here...")
-				fmt.Println(c.Store)
+				// handle unpublished Messages
 				for _, val := range c.Store {
-					fmt.Println("leftover")
 					c.E.HandleError(ErrPub, val)
 				}
 				done <- true
@@ -110,11 +106,12 @@ func (c *Cms) load(done chan bool) {
 			delList := make([]string, 0, len(c.Store))
 			for _, msg := range c.Store {
 				if msg.UpdateAt().Before(time.Now()) {
-					// PUBLISH UPDATE
+					// publish Message
 					c.P.Publish(msg)
 					delList = append(delList, msg.ArticleId())
 				}
 			}
+			// remove published Messages from c.Store
 			for i := 0; i < len(delList); i++ {
 				delete(c.Store, delList[i])
 			}
@@ -122,7 +119,11 @@ func (c *Cms) load(done chan bool) {
 	}
 }
 
+// If the Listener is implemented correctly, ShutDown causes Run to gracefully shutdown.
+// Messages that have not yet been published when ShutDown is called are sent to the ErrorHandler along with a ErrPub error.
+// ShutDown should only be called after Run is called, and should only be called once.
 func (c *Cms) ShutDown() {
 	c.cancel()
+	// wait for c.load() to return
 	<-c.done
 }
