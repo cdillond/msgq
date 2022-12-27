@@ -4,180 +4,117 @@ package cms
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 )
 
 var (
-	ErrLoad   = errors.New("Article.PublishAt() and Article.DeleteAt() both returned false; article could not be loaded")
-	ErrNotPub = errors.New("article was not published")
-	ErrNotDel = errors.New("article was not deleted")
+	ErrLoad = errors.New("message.Id() returned an empty string; message could not be loaded")
+	ErrPub  = errors.New("message was not published")
 )
 
-type Article interface {
-	// Returns the time the Article should be published and a bool. If the bool is false (e.g. when deleting an already published article), the returned time.Time will be ignored and the Article will not be published.
-	PublishAt() (time.Time, bool)
-
-	// Returns the time the Article should be deleted and a bool. If the bool is false, the returned time.Time will be ignored and the Article will not be added to the deletion queue.
-	DeleteAt() (time.Time, bool)
-
-	// Returns the content of the Article, whatever form it might take. This will optionally be parsed by the Publisher or Deleter.
-	Msg() any
+type Message interface {
+	// Returns the time at which the Message should be passed to the Publisher.
+	UpdateAt() time.Time
+	// Optionally returns user-defined methods for the message (e.g. "DELETE", "PUBLISH", etc).
+	// This is not used by the cms package directly, but may be helfpul in an implementation of a Publisher.
+	Method() string
+	// Returns the unique identifier for the article wrapped by the message. This is used as they key when storing a message.
+	// If two messages share an article Id, only one can be stored at a time; the first will be replaced by the second.
+	ArticlId() string
+	// Returns the content of the message, whatever form it might take.
+	Article() any
+	// Optionally returns an identifier for the message. This is not used directly by the cms package, but may be useful for error handling.
+	MessageId() string
 }
 
 type Publisher interface {
-	Publish(msg any) error
+	Publish(msg Message)
 }
 
-type Deleter interface {
-	Delete(msg any) error
-}
-
-// Listen takes a context.Context and a chan Article as an argument and sends Articles from an input source to the channel.
-// *Important: Listen must also close ch and return when ctx is canceled.*
 type Listener interface {
-	Listen(ctx context.Context, ch chan Article)
+	// Listen takes a context.Context and a chan Message as an argument and sends Messages from an input source to the channel.
+	// *Important: Listen must also close ch and return when ctx is canceled.*
+	Listen(ctx context.Context, ch chan Message)
 }
 
 type ErrorHandler interface {
-	HandleError(err error, a Article)
+	HandleError(err error, msg Message)
 }
 
 type Cms struct {
 	L           Listener
 	P           Publisher
-	D           Deleter
 	E           ErrorHandler
-	listenQueue chan Article
-	pubQueue    chan Article
-	delQueue    chan Article
+	Store       map[string]Message
+	listenQueue chan Message
+	loadQueue   chan Message
 	ctx         context.Context
 	cancel      context.CancelFunc
-	wg          sync.WaitGroup
 }
 
-func sendToChan(a Article, ch chan Article) {
-	ch <- a
-}
-
-func New(L Listener, P Publisher, D Deleter, E ErrorHandler) *Cms {
+func New(L Listener, P Publisher, E ErrorHandler) *Cms {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Cms{
-		L: L,
-		P: P,
-		D: D,
-		E: E,
-		// these channels are buffered, but need not be
-		listenQueue: make(chan Article, 100),
-		pubQueue:    make(chan Article, 100),
-		delQueue:    make(chan Article, 100),
+		L:           L,
+		P:           P,
+		E:           E,
+		Store:       make(map[string]Message),
+		listenQueue: make(chan Message, 100),
+		loadQueue:   make(chan Message),
 		ctx:         ctx,
 		cancel:      cancel,
-		wg:          sync.WaitGroup{},
 	}
 }
 
 // Run blocks and should always be invoked in a new goroutine.
 func (c *Cms) Run() {
-	delDone, pubDone := make(chan bool), make(chan bool)
-	defer close(delDone)
-	defer close(pubDone)
-	go c.deleteQueue(delDone)
-	go c.publishQueue(pubDone)
+	done := make(chan bool)
 	go c.L.Listen(c.ctx, c.listenQueue)
+	go c.load(done)
 	for {
-		a, ok := <-c.listenQueue
+		msg, ok := <-c.listenQueue
 		if !ok {
-			// drain pubQueue and delQueue
-			pubDone <- true
-			delDone <- true
-			go func() {
-				for {
-					a := <-c.pubQueue
-					c.E.HandleError(ErrNotPub, a)
-					c.wg.Done()
-				}
-			}()
-			go func() {
-				for {
-					a := <-c.delQueue
-					c.E.HandleError(ErrNotDel, a)
-					c.wg.Done()
-				}
-			}()
-			c.wg.Wait()
-			close(c.pubQueue)
-			close(c.delQueue)
+			// close loadQueue
+			close(c.loadQueue)
+			// wait for load to finish de-queueing
+			<-done
 			return
 		}
-		err := c.load(a)
-		if err != nil {
-			c.E.HandleError(err, a)
+		id := msg.ArticlId()
+		if id == "" {
+			c.E.HandleError(ErrLoad, msg)
+		} else {
+			c.loadQueue <- msg
 		}
 	}
 }
 
-// load loads an article into either the publication queue or the deletion queue, but not both, and returns an error, which is nil if one of the operations is successful.
-// If both a.PublishAt() and a.DeleteAt() return true, a is added to the deletion queue only after it has been published.
-func (c *Cms) load(a Article) error {
-	_, pub := a.PublishAt()
-	if pub {
-		go sendToChan(a, c.pubQueue)
-		c.wg.Add(1)
-		return nil
-	}
-	_, del := a.DeleteAt()
-	if del {
-		go sendToChan(a, c.delQueue)
-		c.wg.Add(1)
-		return nil
-	}
-	return ErrLoad
-}
-
-func (c *Cms) publishQueue(done chan bool) {
+func (c *Cms) load(done chan bool) {
 	for {
 		select {
-		case a := <-c.pubQueue:
-			t, _ := a.PublishAt()
-			if t.Before(time.Now()) {
-				err := c.P.Publish(a.Msg())
-				if err != nil {
-					c.E.HandleError(err, a)
-					c.wg.Done()
-					continue
+		case msg, ok := <-c.loadQueue:
+			if !ok {
+				// de-queue
+				for _, msg := range c.Store {
+					c.E.HandleError(ErrPub, msg)
 				}
-				_, del := a.DeleteAt()
-				if del {
-					go sendToChan(a, c.delQueue)
-					continue
-				}
-				c.wg.Done()
+				done <- true
+				return
 			} else {
-				go sendToChan(a, c.pubQueue)
+				c.Store[msg.ArticlId()] = msg
 			}
-		case <-done:
-			return
-		}
-	}
-}
-
-func (c *Cms) deleteQueue(done chan bool) {
-	for {
-		select {
-		case a := <-c.delQueue:
-			t, _ := a.DeleteAt()
-			if t.Before(time.Now()) {
-				err := c.D.Delete(a.Msg())
-				if err != nil {
-					c.E.HandleError(err, a)
+		default:
+			delList := make([]string, 0, len(c.Store))
+			for _, msg := range c.Store {
+				if msg.UpdateAt().Before(time.Now()) {
+					// PUBLISH UPDATE
+					c.P.Publish(msg)
+					delList = append(delList, msg.ArticlId())
 				}
-				c.wg.Done()
-			} else {
-				go sendToChan(a, c.delQueue)
 			}
-		case <-done:
-			return
+			for i := 0; i < len(delList); i++ {
+				delete(c.Store, delList[i])
+			}
 		}
 	}
 }
