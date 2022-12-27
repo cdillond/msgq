@@ -4,6 +4,7 @@ package cms
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -15,15 +16,15 @@ var (
 type Message interface {
 	// Returns the time at which the Message should be passed to the Publisher.
 	UpdateAt() time.Time
-	// Optionally returns user-defined methods for the message (e.g. "DELETE", "PUBLISH", etc).
+	// Optionally returns user-defined methods for the Message (e.g. "DELETE", "PUBLISH", etc).
 	// This is not used by the cms package directly, but may be helfpul in an implementation of a Publisher.
 	Method() string
-	// Returns the unique identifier for the article wrapped by the message. This is used as they key when storing a message.
-	// If two messages share an article Id, only one can be stored at a time; the first will be replaced by the second.
-	ArticlId() string
-	// Returns the content of the message, whatever form it might take.
+	// Returns the unique identifier for the article wrapped by the Message. This is used as they key when storing a Message.
+	// If two Messages share an article Id, only one can be stored at a time; the first will be replaced by the second.
+	ArticleId() string
+	// Returns the content of the Message, whatever form it might take.
 	Article() any
-	// Optionally returns an identifier for the message. This is not used directly by the cms package, but may be useful for error handling.
+	// Optionally returns an identifier for the Message. This is not used directly by the cms package, but may be useful for error handling.
 	MessageId() string
 }
 
@@ -80,7 +81,7 @@ func (c *Cms) Run() {
 			<-done
 			return
 		}
-		id := msg.ArticlId()
+		id := msg.ArticleId()
 		if id == "" {
 			c.E.HandleError(ErrLoad, msg)
 		} else {
@@ -96,12 +97,13 @@ func (c *Cms) load(done chan bool) {
 			if !ok {
 				// de-queue
 				for _, msg := range c.Store {
+					fmt.Println("leftover")
 					c.E.HandleError(ErrPub, msg)
 				}
 				done <- true
 				return
 			} else {
-				c.Store[msg.ArticlId()] = msg
+				c.Store[msg.ArticleId()] = msg
 			}
 		default:
 			delList := make([]string, 0, len(c.Store))
@@ -109,7 +111,7 @@ func (c *Cms) load(done chan bool) {
 				if msg.UpdateAt().Before(time.Now()) {
 					// PUBLISH UPDATE
 					c.P.Publish(msg)
-					delList = append(delList, msg.ArticlId())
+					delList = append(delList, msg.ArticleId())
 				}
 			}
 			for i := 0; i < len(delList); i++ {
