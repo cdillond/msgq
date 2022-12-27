@@ -4,6 +4,7 @@ package cms
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 )
 
@@ -32,7 +33,7 @@ type Deleter interface {
 	Delete(msg any) error
 }
 
-// Listen takes a chan Article as an argument and sends Articles from an input source to the chan.
+// Listen takes a context.Context and a chan Article as an argument and sends Articles from an input source to the channel.
 // *Important: Listen must also close ch and return when ctx is canceled.*
 type Listener interface {
 	Listen(ctx context.Context, ch chan Article)
@@ -52,6 +53,7 @@ type Cms struct {
 	delQueue    chan Article
 	ctx         context.Context
 	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 func sendToChan(a Article, ch chan Article) {
@@ -71,29 +73,40 @@ func New(L Listener, P Publisher, D Deleter, E ErrorHandler) *Cms {
 		delQueue:    make(chan Article, 100),
 		ctx:         ctx,
 		cancel:      cancel,
+		wg:          sync.WaitGroup{},
 	}
 }
 
 // Run blocks and should always be invoked in a new goroutine.
 func (c *Cms) Run() {
 	delDone, pubDone := make(chan bool), make(chan bool)
+	defer close(delDone)
+	defer close(pubDone)
 	go c.deleteQueue(delDone)
 	go c.publishQueue(pubDone)
 	go c.L.Listen(c.ctx, c.listenQueue)
 	for {
 		a, ok := <-c.listenQueue
 		if !ok {
-			// drain pubQueue
+			// drain pubQueue and delQueue
 			pubDone <- true
-			for len(c.pubQueue) != 0 {
-				c.E.HandleError(ErrNotPub, <-c.pubQueue)
-			}
-			close(c.pubQueue)
-			// drain delQueue
 			delDone <- true
-			for len(c.delQueue) != 0 {
-				c.E.HandleError(ErrNotDel, <-c.delQueue)
-			}
+			go func() {
+				for {
+					a := <-c.pubQueue
+					c.E.HandleError(ErrNotPub, a)
+					c.wg.Done()
+				}
+			}()
+			go func() {
+				for {
+					a := <-c.delQueue
+					c.E.HandleError(ErrNotPub, a)
+					c.wg.Done()
+				}
+			}()
+			c.wg.Wait()
+			close(c.pubQueue)
 			close(c.delQueue)
 			return
 		}
@@ -110,11 +123,13 @@ func (c *Cms) load(a Article) error {
 	_, pub := a.PublishAt()
 	if pub {
 		go sendToChan(a, c.pubQueue)
+		c.wg.Add(1)
 		return nil
 	}
 	_, del := a.DeleteAt()
 	if del {
 		go sendToChan(a, c.delQueue)
+		c.wg.Add(1)
 		return nil
 	}
 	return ErrLoad
@@ -129,12 +144,14 @@ func (c *Cms) publishQueue(done chan bool) {
 				err := c.P.Publish(a.Msg())
 				if err != nil {
 					c.E.HandleError(err, a)
+					c.wg.Done()
 					continue
 				}
 				_, del := a.DeleteAt()
 				if del {
 					go sendToChan(a, c.delQueue)
 				}
+				c.wg.Done()
 			} else {
 				go sendToChan(a, c.pubQueue)
 			}
@@ -153,8 +170,8 @@ func (c *Cms) deleteQueue(done chan bool) {
 				err := c.D.Delete(a.Msg())
 				if err != nil {
 					c.E.HandleError(err, a)
-					continue
 				}
+				c.wg.Done()
 			} else {
 				go sendToChan(a, c.delQueue)
 			}
