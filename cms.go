@@ -101,7 +101,7 @@ func (c *Cms) Run() {
 			go func() {
 				for {
 					a := <-c.delQueue
-					c.E.HandleError(ErrNotPub, a)
+					c.E.HandleError(ErrNotDel, a)
 					c.wg.Done()
 				}
 			}()
@@ -150,6 +150,7 @@ func (c *Cms) publishQueue(done chan bool) {
 				_, del := a.DeleteAt()
 				if del {
 					go sendToChan(a, c.delQueue)
+					continue
 				}
 				c.wg.Done()
 			} else {
