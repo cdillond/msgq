@@ -49,6 +49,7 @@ type Cms struct {
 	Store       map[string]Message
 	listenQueue chan Message
 	loadQueue   chan Message
+	done        chan bool
 	ctx         context.Context
 	cancel      context.CancelFunc
 }
@@ -62,6 +63,7 @@ func New(L Listener, P Publisher, E ErrorHandler) *Cms {
 		Store:       make(map[string]Message),
 		listenQueue: make(chan Message, 100),
 		loadQueue:   make(chan Message),
+		done:        make(chan bool),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
@@ -69,16 +71,13 @@ func New(L Listener, P Publisher, E ErrorHandler) *Cms {
 
 // Run blocks and should always be invoked in a new goroutine.
 func (c *Cms) Run() {
-	done := make(chan bool)
 	go c.L.Listen(c.ctx, c.listenQueue)
-	go c.load(done)
+	go c.load(c.done)
 	for {
 		msg, ok := <-c.listenQueue
 		if !ok {
 			// close loadQueue
 			close(c.loadQueue)
-			// wait for load to finish de-queueing
-			<-done
 			return
 		}
 		id := msg.ArticleId()
@@ -125,4 +124,5 @@ func (c *Cms) load(done chan bool) {
 
 func (c *Cms) ShutDown() {
 	c.cancel()
+	<-c.done
 }
