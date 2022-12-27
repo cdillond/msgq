@@ -2,7 +2,6 @@
 package cms
 
 import (
-	"context"
 	"errors"
 	"time"
 )
@@ -40,9 +39,8 @@ func New() *Cms {
 	}
 }
 
-// Run returns a channel that receives Messages and a function to gracefully shutdown.
-func (c *Cms) Run(ctx context.Context, P Publisher, E ErrorHandler) (chan Message, func()) {
-	_, cancel := context.WithCancel(ctx)
+// Run returns a channel that receives Messages. Close the channel to shutdown the cms.
+func (c *Cms) Run(P Publisher, E ErrorHandler) chan Message {
 	done := make(chan bool)
 	listenQueue := make(chan Message, 100)
 	loadQueue := make(chan Message)
@@ -53,6 +51,7 @@ func (c *Cms) Run(ctx context.Context, P Publisher, E ErrorHandler) (chan Messag
 			if !ok {
 				// close loadQueue
 				close(loadQueue)
+				<-done
 				return
 			}
 			id := msg.ArticleId()
@@ -63,11 +62,7 @@ func (c *Cms) Run(ctx context.Context, P Publisher, E ErrorHandler) (chan Messag
 			}
 		}
 	}()
-
-	return listenQueue, func() {
-		cancel()
-		<-done
-	}
+	return listenQueue
 }
 
 func (c *Cms) load(done chan bool, loadQueue chan Message, P Publisher, E ErrorHandler) {
