@@ -15,26 +15,15 @@ var (
 type Message interface {
 	// Returns the time at which the Message should be passed to the Publisher.
 	UpdateAt() time.Time
-	// Optionally returns user-defined methods for the Message (e.g. "DELETE", "PUBLISH", etc).
-	// This is not used by the cms package directly, but may be helfpul in an implementation of a Publisher.
-	Method() string
 	// Returns the unique identifier for the article wrapped by the Message. This is used as they key when storing a Message.
 	// If two Messages share an article Id, only one can be stored at a time; the first will be replaced by the second.
 	ArticleId() string
 	// Returns the content of the Message, whatever form it might take.
 	Article() any
-	// Optionally returns an identifier for the Message. This is not used directly by the cms package, but may be useful for error handling.
-	MessageId() string
 }
 
 type Publisher interface {
 	Publish(msg Message)
-}
-
-type Listener interface {
-	// Listen takes a context.Context and a chan Message as an argument and sends Messages from an input source to the channel.
-	// *Important: Listen must also close ch and return when ctx is canceled.*
-	Listen(ctx context.Context, ch chan Message)
 }
 
 type ErrorHandler interface {
@@ -42,60 +31,53 @@ type ErrorHandler interface {
 }
 
 type Cms struct {
-	L           Listener
-	P           Publisher
-	E           ErrorHandler
-	Store       map[string]Message
-	listenQueue chan Message
-	loadQueue   chan Message
-	done        chan bool
-	ctx         context.Context
-	cancel      context.CancelFunc
+	Store map[string]Message
 }
 
-func New(L Listener, P Publisher, E ErrorHandler) *Cms {
-	ctx, cancel := context.WithCancel(context.Background())
+func New() *Cms {
 	return &Cms{
-		L:           L,
-		P:           P,
-		E:           E,
-		Store:       make(map[string]Message),
-		listenQueue: make(chan Message, 100),
-		loadQueue:   make(chan Message),
-		done:        make(chan bool),
-		ctx:         ctx,
-		cancel:      cancel,
+		Store: make(map[string]Message),
 	}
 }
 
-// Run blocks and should always be invoked in a new goroutine. Run should not be called after ShutDown.
-func (c *Cms) Run() {
-	go c.L.Listen(c.ctx, c.listenQueue)
-	go c.load(c.done)
-	for {
-		msg, ok := <-c.listenQueue
-		if !ok {
-			// close loadQueue
-			close(c.loadQueue)
-			return
+// Run returns a channel that receives Messages and a function to gracefully shutdown.
+func (c *Cms) Run(ctx context.Context, P Publisher, E ErrorHandler) (chan Message, func()) {
+	_, cancel := context.WithCancel(ctx)
+	done := make(chan bool)
+	listenQueue := make(chan Message, 100)
+	loadQueue := make(chan Message)
+	go c.load(done, loadQueue, P, E)
+	go func() {
+		for {
+			msg, ok := <-listenQueue
+			if !ok {
+				// close loadQueue
+				close(loadQueue)
+				return
+			}
+			id := msg.ArticleId()
+			if id == "" {
+				E.HandleError(ErrLoad, msg)
+			} else {
+				loadQueue <- msg
+			}
 		}
-		id := msg.ArticleId()
-		if id == "" {
-			c.E.HandleError(ErrLoad, msg)
-		} else {
-			c.loadQueue <- msg
-		}
+	}()
+
+	return listenQueue, func() {
+		cancel()
+		<-done
 	}
 }
 
-func (c *Cms) load(done chan bool) {
+func (c *Cms) load(done chan bool, loadQueue chan Message, P Publisher, E ErrorHandler) {
 	for {
 		select {
-		case msg, ok := <-c.loadQueue:
+		case msg, ok := <-loadQueue:
 			if !ok {
 				// handle unpublished Messages
 				for _, val := range c.Store {
-					c.E.HandleError(ErrPub, val)
+					E.HandleError(ErrPub, val)
 				}
 				done <- true
 				return
@@ -107,7 +89,7 @@ func (c *Cms) load(done chan bool) {
 			for _, msg := range c.Store {
 				if msg.UpdateAt().Before(time.Now()) {
 					// publish Message
-					c.P.Publish(msg)
+					P.Publish(msg)
 					delList = append(delList, msg.ArticleId())
 				}
 			}
@@ -117,13 +99,4 @@ func (c *Cms) load(done chan bool) {
 			}
 		}
 	}
-}
-
-// If the Listener is implemented correctly, ShutDown causes Run to gracefully shutdown.
-// Messages that have not yet been published when ShutDown is called are sent to the ErrorHandler along with a ErrPub error.
-// ShutDown should only be called after Run is called, and should only be called once.
-func (c *Cms) ShutDown() {
-	c.cancel()
-	// wait for c.load() to return
-	<-c.done
 }
