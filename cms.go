@@ -96,9 +96,11 @@ func (c *Cms) load(done chan bool) {
 		case msg, ok := <-c.loadQueue:
 			if !ok {
 				// de-queue
-				for _, msg := range c.Store {
+				fmt.Println("there should be some output here...")
+				fmt.Println(c.Store)
+				for _, val := range c.Store {
 					fmt.Println("leftover")
-					c.E.HandleError(ErrPub, msg)
+					c.E.HandleError(ErrPub, val)
 				}
 				done <- true
 				return
