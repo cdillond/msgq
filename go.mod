@@ -1,3 +1,3 @@
-module github.com/cdillond/cms
+module github.com/cdillond/msgq
 
 go 1.19
