@@ -8,19 +8,17 @@ import (
 
 var (
 	ErrLoad = errors.New("message.Id() returned an empty string; message could not be loaded")
-	ErrPub  = errors.New("message was not published")
+	ErrPub  = errors.New("MsgQ shut down before message was published")
 )
 
 type Message interface {
-	// Returns the time at which the Message should be passed to the Publisher.
+	// Returns the time at which the Message should be published.
 	UpdateAt() time.Time
-	// Returns the unique identifier for the content wrapped by the Message. This is used as they key when storing a Message in the cms.Store queue.
+	// Returns the unique identifier for the content wrapped by the Message. This is used as they key when storing a Message in the MsgQ.Store queue.
 	// If two Messages share a ContentId() return value, only one can be stored at a time; the first will be replaced by the second.
 	ContentId() string
-}
-
-type Publisher interface {
-	Publish(msg Message)
+	// Publishes the content of the Message and returns a nil error on success.
+	Publish() error
 }
 
 type ErrorHandler interface {
@@ -37,12 +35,12 @@ func New() *MsgQ {
 	}
 }
 
-// Run returns a channel that receives Messages and queues them for publication. Closing this channel shuts down the MsgQ. The chan struct{} that is also returned by Run() is notified when the shutdown is complete.
-func (m *MsgQ) Run(P Publisher, E ErrorHandler) (chan Message, chan struct{}) {
+// Run returns a channel that receives Messages and queues them for publication. Closing this channel shuts down the MsgQ. The chan struct{} that is also returned by Run() is notified when the shutdown is complete. Run() deletes Messages from the MsgQ.Store after Message.Publish() is called.
+func (m *MsgQ) Run(E ErrorHandler) (chan Message, chan struct{}) {
 	done1, done2 := make(chan struct{}), make(chan struct{})
 	listenQueue := make(chan Message, 10)
 	loadQueue := make(chan Message)
-	go m.load(done1, loadQueue, P, E)
+	go m.load(done1, loadQueue, E)
 	go func() {
 		for {
 			msg, ok := <-listenQueue
@@ -64,7 +62,7 @@ func (m *MsgQ) Run(P Publisher, E ErrorHandler) (chan Message, chan struct{}) {
 	return listenQueue, done2
 }
 
-func (m *MsgQ) load(done chan struct{}, loadQueue chan Message, P Publisher, E ErrorHandler) {
+func (m *MsgQ) load(done chan struct{}, loadQueue chan Message, E ErrorHandler) {
 	for {
 		select {
 		case msg, ok := <-loadQueue:
@@ -83,7 +81,10 @@ func (m *MsgQ) load(done chan struct{}, loadQueue chan Message, P Publisher, E E
 			for id, msg := range m.Store {
 				if msg.UpdateAt().Before(time.Now()) {
 					// publish Message
-					P.Publish(msg)
+					err := msg.Publish()
+					if err != nil {
+						E.HandleError(err, msg)
+					}
 					delList = append(delList, id)
 				}
 			}
