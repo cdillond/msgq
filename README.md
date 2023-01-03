@@ -1,4 +1,5 @@
 # msgq
+<a href="https://pkg.go.dev/github.com/cdillond/msgq"><img src="https://pkg.go.dev/badge/github.com/cdillond/msgq.svg" alt="Go Reference"></a>\
 I created this to play around with channels in Go. It should not be considered production ready. This package is intended to be as general and adaptable as possible, so it provides very little in the way of specific features.
 
 ## Example
