@@ -1,7 +1,7 @@
 # msgq
 I created this to play around with channels in Go. It should not be considered production ready. This package is intended to be as general and adaptable as possible, so it provides very little in the way of specific features.
 \
-Example:
+## Example
 ```go
 // implement the Message interface
 type DefaultMessage struct {
