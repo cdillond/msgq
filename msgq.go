@@ -7,7 +7,7 @@ import (
 )
 
 var (
-	ErrLoad = errors.New("message.Id() returned an empty string; message could not be loaded")
+	ErrLoad = errors.New("Message.ContentId() returned an empty string; message could not be loaded")
 	ErrPub  = errors.New("MsgQ shut down before message was published")
 )
 
